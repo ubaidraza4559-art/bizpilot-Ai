@@ -1,0 +1,18 @@
+{
+  "author": "Ubaid Raza",
+  "dependencies": {
+    "@vercel/blob": "^2.8.2",
+    "express": "^5.1.0",
+    "pg": "^8.13.0"
+  },
+  "description": "BizPilot AI \u2014 AI-powered lead, proposal and follow-up workspace. Runnable stack: Node + Express + SQLite. Production target: Next.js + Supabase + OpenAI (schema and API contract in supabase/ and prisma/).",
+  "license": "MIT",
+  "main": "server.js",
+  "name": "bizpilot-ai",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "test": "node tests/test-api.js"
+  },
+  "version": "1.0.0"
+}
