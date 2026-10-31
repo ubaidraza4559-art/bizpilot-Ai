@@ -78,12 +78,19 @@ const planOf = (u) => PLANS[u.plan] || PLANS.FREE;
 // present. Neon via Vercel adds variables with the custom prefix chosen
 // at install time (STORAGE_ in this project), so check the pooled URL
 // under every plausible name before falling back to a non-pooling URL.
-// If Postgres init fails for any reason, fall back to JsonDb/Blob so
-// the site stays up on its previous store instead of going down.
+// If Postgres init fails, the server does NOT fall back to another
+// store: a per-instance fallback would split data between stores.
+// Instead API requests return 503 until Postgres is ready again.
 const PG_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_POSTGRES_URL || process.env.STORAGE_DATABASE_URL || process.env.NEON_DATABASE_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.STORAGE_POSTGRES_URL_NON_POOLING || '';
 const USE_PG = !!PG_URL;
 const USE_JSON_DB = !USE_PG && !!(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_LOCAL_FILE);
-let db; let dbReady = Promise.resolve();
+let db; let dbReady = Promise.resolve(); let pgFailed = false;
+async function ensurePgReady() {
+  if (!USE_PG || !pgFailed) return !pgFailed;
+  try { await db.init(); await migrateBlobToPgIfEmpty(); pgFailed = false; }
+  catch (e) { console.error('[pgdb] retry init failed:', e.message); }
+  return !pgFailed;
+}
 async function migrateBlobToPgIfEmpty() {
   if (!process.env.BLOB_READ_WRITE_TOKEN && !process.env.BLOB_LOCAL_FILE) return;
   try {
@@ -107,12 +114,19 @@ if (USE_PG) {
   const { PgDb } = require('./lib/pgdb');
   db = new PgDb(PG_URL);
   dbReady = (async () => {
-    try { await db.init(); await migrateBlobToPgIfEmpty(); }
-    catch (e) {
-      console.error('[pgdb] init failed, falling back to JsonDb/Blob:', e.message);
-      const { JsonDb } = require('./lib/jsondb');
-      db = new JsonDb(); await db.loadPersisted().catch(() => {});
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try { await db.init(); await migrateBlobToPgIfEmpty(); pgFailed = false; return; }
+      catch (e) { lastErr = e; console.error(`[pgdb] init attempt ${attempt} failed:`, e.message); await new Promise((r) => setTimeout(r, attempt * 1000)); }
     }
+    // DO NOT fall back to Blob/SQLite when Postgres is configured.
+    // A per-instance fallback splits data between two stores: an
+    // account created on a Postgres instance vanishes on a fallback
+    // instance, and can even be re-registered there. When Postgres is
+    // configured, a failed instance must fail loudly (503, retried on
+    // the next request) instead of silently serving a different store.
+    pgFailed = true;
+    console.error('[pgdb] init failed after retries:', lastErr && lastErr.message);
   })();
 } else if (USE_JSON_DB) {
   const { JsonDb } = require('./lib/jsondb');
@@ -258,6 +272,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(async (req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
   try { await dbReady; } catch {}
+  if (USE_PG && !(await ensurePgReady())) return res.status(503).json({ ok: false, error: 'Database is starting. Please try again in a few seconds.' });
   if (db && db.loadPersisted && !db.dirty) {
     try { await db.loadPersisted(); } catch (e) { console.error('[jsondb] per-request reload failed, using in-memory copy:', e.message); }
   }
